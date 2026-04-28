@@ -62,7 +62,7 @@ setup_venv() {
     "$PIP" install --upgrade pip -q
     info "安装依赖（使用国内镜像）..."
     "$PIP" config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple -q 2>/dev/null || true
-    "$PIP" install polars akshare pyarrow pyyaml rich httpx click -q
+    "$PIP" install polars akshare baostock pandas pyarrow pyyaml rich httpx click -q
     info "依赖安装完成"
 }
 

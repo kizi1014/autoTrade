@@ -1,6 +1,7 @@
 import akshare as ak
 import polars as pl
 from datetime import date
+from pathlib import Path
 from src.network import HEADERS
 
 
@@ -8,8 +9,15 @@ class DataFetcher:
     def __init__(self, config, storage):
         self.config = config
         self.storage = storage
+        self._bs_logged_in = False
 
     def fetch_stock_list(self):
+        csv_path = Path("stock_list.csv")
+        if csv_path.exists():
+            df = pl.read_csv(csv_path, schema_overrides={"代码": pl.Utf8})
+            if not df.is_empty():
+                return df
+
         for api_func, (code_col, name_col) in [
             (ak.stock_zh_a_spot_em, ("代码", "名称")),
             (ak.stock_info_a_code_name, ("证券代码", "证券简称")),
@@ -21,9 +29,31 @@ class DataFetcher:
                 )
             except Exception:
                 continue
+
+        try:
+            import baostock as bs
+            bs.login()
+            rs = bs.query_stock_basic()
+            data = rs.get_data()
+            bs.logout()
+            stocks = data[data["type"] == "1"]
+            return pl.from_pandas(stocks[["code", "code_name"]]).rename(
+                {"code": "代码", "code_name": "名称"}
+            ).with_columns(
+                pl.col("代码").str.replace(r"^sh\.|^sz\.", "")
+            )
+        except Exception:
+            pass
+
         raise RuntimeError("无法获取股票列表，请检查网络连接")
 
     def fetch_daily(self, code, name, start_date, end_date):
+        data = self._fetch_akshare(code, name, start_date, end_date)
+        if data is not None:
+            return data
+        return self._fetch_baostock(code, name, start_date, end_date)
+
+    def _fetch_akshare(self, code, name, start_date, end_date):
         try:
             df = ak.stock_zh_a_hist(
                 symbol=code,
@@ -56,6 +86,59 @@ class DataFetcher:
         }).select(["date", "code", "name", "open", "close", "high", "low", "volume"])
         return data
 
+    def _fetch_baostock(self, code, name, start_date, end_date):
+        try:
+            import baostock as bs
+            import pandas as pd
+        except ImportError:
+            return None
+        try:
+            bs.login()
+            self._bs_logged_in = True
+            prefix = "sh." if code.startswith(("6", "9")) else "sz."
+            symbol = prefix + code
+            rs = bs.query_history_k_data_plus(
+                symbol,
+                "date,code,open,high,low,close,volume",
+                start_date=start_date,
+                end_date=end_date,
+                frequency="d",
+                adjustflag="2",
+            )
+            rows = []
+            while rs and rs.error_code == "0":
+                chunk = rs.get_data()
+                if chunk.empty:
+                    break
+                rows.append(chunk)
+                rs.next()
+            bs.logout()
+            self._bs_logged_in = False
+            if not rows:
+                return None
+            df = pl.from_pandas(pd.concat(rows, ignore_index=True))
+        except Exception:
+            try:
+                bs.logout()
+            except Exception:
+                pass
+            self._bs_logged_in = False
+            return None
+
+        if df.is_empty():
+            return None
+        df = df.with_columns([
+            pl.lit(code).alias("code"),
+            pl.lit(name).alias("name"),
+            pl.col("date").str.strptime(pl.Date, "%Y-%m-%d"),
+            pl.col("open").cast(pl.Float64),
+            pl.col("close").cast(pl.Float64),
+            pl.col("high").cast(pl.Float64),
+            pl.col("low").cast(pl.Float64),
+            pl.col("volume").cast(pl.Float64),
+        ]).select(["date", "code", "name", "open", "close", "high", "low", "volume"])
+        return df
+
     def update_all(self):
         cfg = self.config["data"]
         stocks = self.fetch_stock_list()
@@ -65,6 +148,7 @@ class DataFetcher:
         start = cfg.get("start_date", "2015-01-01")
         end = cfg.get("end_date") or date.today().strftime("%Y-%m-%d")
 
+        import pandas as pd
         from rich.progress import track
         for code in track(codes, description="[cyan]正在下载数据..."):
             name = names.get(code, code)
