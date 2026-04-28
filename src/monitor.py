@@ -3,6 +3,7 @@ import polars as pl
 import akshare as ak
 from datetime import datetime, date, time as dtime
 from datetime import timedelta
+from src.network import HEADERS
 
 
 class RealtimeMonitor:

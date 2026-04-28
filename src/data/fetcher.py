@@ -1,6 +1,7 @@
 import akshare as ak
 import polars as pl
 from datetime import date
+from src.network import HEADERS
 
 
 class DataFetcher:
@@ -9,8 +10,18 @@ class DataFetcher:
         self.storage = storage
 
     def fetch_stock_list(self):
-        df = ak.stock_zh_a_spot_em()
-        return pl.from_pandas(df[["代码", "名称"]])
+        for api_func, (code_col, name_col) in [
+            (ak.stock_zh_a_spot_em, ("代码", "名称")),
+            (ak.stock_info_a_code_name, ("证券代码", "证券简称")),
+        ]:
+            try:
+                df = api_func()
+                return pl.from_pandas(df[[code_col, name_col]]).rename(
+                    {code_col: "代码", name_col: "名称"}
+                )
+            except Exception:
+                continue
+        raise RuntimeError("无法获取股票列表，请检查网络连接")
 
     def fetch_daily(self, code, name, start_date, end_date):
         try:
