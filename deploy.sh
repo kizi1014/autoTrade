@@ -130,11 +130,11 @@ self_check() {
 
 create_scripts() {
     info "创建快捷启动脚本..."
-    cat > "$AUTO_TRADE_DIR/auto-trade.sh" << 'SCRIPT'
+    cat > "$AUTO_TRADE_DIR/auto-trade.sh" << SCRIPT
 #!/bin/bash
-cd "$(cd "$(dirname "$0")" && pwd)"
+cd "${AUTO_TRADE_DIR}"
 source venv/bin/activate
-exec python run.py "$@"
+exec python run.py "\$@"
 SCRIPT
     chmod +x "$AUTO_TRADE_DIR/auto-trade.sh"
 
@@ -144,15 +144,15 @@ SCRIPT
 }
 
 create_service() {
-    cat > /etc/systemd/system/auto-trade.service << 'EOF'
+    cat > /etc/systemd/system/auto-trade.service << EOF
 [Unit]
 Description=Auto Trade Signal Service
 After=network.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/root/autoTrade
-ExecStart=/root/autoTrade/venv/bin/python run.py signal --notify
+WorkingDirectory=${AUTO_TRADE_DIR}
+ExecStart=${VENV_DIR}/bin/python run.py signal --notify
 User=root
 
 [Install]
