@@ -1,0 +1,24 @@
+data:
+  source: akshare
+  stock_pool: []
+  start_date: "2015-01-01"
+  end_date: null
+  adjust: qfq
+
+backtest:
+  initial_capital: 1000000
+  commission_rate: 0.0003
+  min_commission: 5.0
+  stamp_duty: 0.0005
+  slippage: 0.001
+  benchmark: "000300"
+
+monitor:
+  interval: 600
+  alert_cooldown: 600
+
+notify:
+  enabled: true
+  type: dingtalk
+  webhook: "https://oapi.dingtalk.com/robot/send?access_token=3ab081f35af9b37c582e48333885e8560875f3899166805f09ed23b6774f3cd8"
+  secret: "SECc087969732b02bb9f0b0c5c5915ecebdd0d7e4fa38479d9200d81819bdc81701"
