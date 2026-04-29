@@ -9,7 +9,34 @@ class DataFetcher:
     def __init__(self, config, storage):
         self.config = config
         self.storage = storage
-        self._bs_logged_in = False
+        self._use_akshare = None
+
+    def _akshare_works(self):
+        if self._use_akshare is not None:
+            return self._use_akshare
+        try:
+            ak.stock_zh_a_spot_em()
+            self._use_akshare = True
+        except Exception:
+            try:
+                ak.stock_info_a_code_name()
+                self._use_akshare = True
+            except Exception:
+                self._use_akshare = False
+        return self._use_akshare
+
+    def _baostock_login(self):
+        try:
+            import baostock as bs
+            bs.login()
+            return bs, True
+        except Exception:
+            return None, False
+
+    def _prefix(self, code):
+        if code.startswith(("5", "6", "9")):
+            return "sh."
+        return "sz."
 
     def fetch_stock_list(self):
         csv_path = Path("stock_list.csv")
@@ -18,39 +45,44 @@ class DataFetcher:
             if not df.is_empty():
                 return df
 
-        for api_func, (code_col, name_col) in [
-            (ak.stock_zh_a_spot_em, ("代码", "名称")),
-            (ak.stock_info_a_code_name, ("证券代码", "证券简称")),
-        ]:
+        if self._akshare_works():
+            for api_func, (code_col, name_col) in [
+                (ak.stock_zh_a_spot_em, ("代码", "名称")),
+                (ak.stock_info_a_code_name, ("证券代码", "证券简称")),
+            ]:
+                try:
+                    df = api_func()
+                    return pl.from_pandas(df[[code_col, name_col]]).rename(
+                        {code_col: "代码", name_col: "名称"}
+                    )
+                except Exception:
+                    continue
+
+        bs, ok = self._baostock_login()
+        if ok:
             try:
-                df = api_func()
-                return pl.from_pandas(df[[code_col, name_col]]).rename(
-                    {code_col: "代码", name_col: "名称"}
+                rs = bs.query_stock_basic()
+                data = rs.get_data()
+                bs.logout()
+                stocks = data[data["type"] == "1"]
+                return pl.from_pandas(stocks[["code", "code_name"]]).rename(
+                    {"code": "代码", "code_name": "名称"}
+                ).with_columns(
+                    pl.col("代码").str.replace(r"^sh\.|^sz\.", "")
                 )
             except Exception:
-                continue
-
-        try:
-            import baostock as bs
-            bs.login()
-            rs = bs.query_stock_basic()
-            data = rs.get_data()
-            bs.logout()
-            stocks = data[data["type"] == "1"]
-            return pl.from_pandas(stocks[["code", "code_name"]]).rename(
-                {"code": "代码", "code_name": "名称"}
-            ).with_columns(
-                pl.col("代码").str.replace(r"^sh\.|^sz\.", "")
-            )
-        except Exception:
-            pass
+                try:
+                    bs.logout()
+                except Exception:
+                    pass
 
         raise RuntimeError("无法获取股票列表，请检查网络连接")
 
     def fetch_daily(self, code, name, start_date, end_date):
-        data = self._fetch_akshare(code, name, start_date, end_date)
-        if data is not None:
-            return data
+        if self._akshare_works():
+            data = self._fetch_akshare(code, name, start_date, end_date)
+            if data is not None:
+                return data
         return self._fetch_baostock(code, name, start_date, end_date)
 
     def _fetch_akshare(self, code, name, start_date, end_date):
@@ -77,26 +109,19 @@ class DataFetcher:
             pl.col("最低").cast(pl.Float64),
             pl.col("成交量").cast(pl.Float64),
         ]).rename({
-            "日期": "date",
-            "开盘": "open",
-            "收盘": "close",
-            "最高": "high",
-            "最低": "low",
-            "成交量": "volume",
+            "日期": "date", "开盘": "open", "收盘": "close",
+            "最高": "high", "最低": "low", "成交量": "volume",
         }).select(["date", "code", "name", "open", "close", "high", "low", "volume"])
         return data
 
     def _fetch_baostock(self, code, name, start_date, end_date):
         try:
             import baostock as bs
-            import pandas as pd
         except ImportError:
             return None
         try:
             bs.login()
-            self._bs_logged_in = True
-            prefix = "sh." if code.startswith(("6", "9")) else "sz."
-            symbol = prefix + code
+            symbol = self._prefix(code) + code
             rs = bs.query_history_k_data_plus(
                 symbol,
                 "date,code,open,high,low,close,volume",
@@ -105,29 +130,31 @@ class DataFetcher:
                 frequency="d",
                 adjustflag="2",
             )
-            rows = []
-            while rs and rs.error_code == "0":
+            if rs.error_code != "0":
+                bs.logout()
+                return None
+            import pandas as pd
+            rows = [rs.get_data()]
+            while rs.next():
                 chunk = rs.get_data()
                 if chunk.empty:
                     break
                 rows.append(chunk)
-                rs.next()
             bs.logout()
-            self._bs_logged_in = False
-            if not rows:
+            if not rows or rows[0].empty:
                 return None
-            df = pl.from_pandas(pd.concat(rows, ignore_index=True))
+            merged = pd.concat(rows, ignore_index=True)
         except Exception:
             try:
                 bs.logout()
             except Exception:
                 pass
-            self._bs_logged_in = False
             return None
 
+        df = pl.from_pandas(merged)
         if df.is_empty():
             return None
-        df = df.with_columns([
+        return df.with_columns([
             pl.lit(code).alias("code"),
             pl.lit(name).alias("name"),
             pl.col("date").str.strptime(pl.Date, "%Y-%m-%d"),
@@ -137,7 +164,6 @@ class DataFetcher:
             pl.col("low").cast(pl.Float64),
             pl.col("volume").cast(pl.Float64),
         ]).select(["date", "code", "name", "open", "close", "high", "low", "volume"])
-        return df
 
     def update_all(self):
         cfg = self.config["data"]
@@ -148,7 +174,6 @@ class DataFetcher:
         start = cfg.get("start_date", "2015-01-01")
         end = cfg.get("end_date") or date.today().strftime("%Y-%m-%d")
 
-        import pandas as pd
         from rich.progress import track
         for code in track(codes, description="[cyan]正在下载数据..."):
             name = names.get(code, code)
